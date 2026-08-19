@@ -296,6 +296,21 @@ class IndustrialReconstruction(Node):
             dir = np.array([norm_filt.normal_direction.x, norm_filt.normal_direction.y, norm_filt.normal_direction.z]).reshape(3,1)
             cropped_mesh = filterNormals(cropped_mesh, dir, np.radians(norm_filt.angle))
 
+        # LOCAL PATCH (2026-08-16), not upstream. An empty crop is a normal
+        # outcome of a bounding box or a normal filter that did not match, but
+        # meshToRos() below does vertices[:, 2].min() and raises "zero-size array
+        # to reduction operation minimum" -- unhandled, in a service callback, so
+        # the NODE DIES and the next start_reconstruction has nothing to talk to.
+        # Report it instead; a failed reconstruction should not cost a relaunch.
+        if len(cropped_mesh.vertices) == 0:
+            res.success = False
+            res.message = ("The mesh is empty after cropping and filtering. The "
+                           "TSDF had %d points, so the bounding box or the "
+                           "normal filter excluded all of them."
+                           % (len(point_cloud.points),))
+            self.get_logger().error(res.message)
+            return res
+
         triangle_clusters, cluster_n_triangles, cluster_area = (cropped_mesh.cluster_connected_triangles())
         triangle_clusters = np.asarray(triangle_clusters)
         cluster_n_triangles = np.asarray(cluster_n_triangles)
@@ -304,6 +319,15 @@ class IndustrialReconstruction(Node):
         cropped_mesh.remove_triangles_by_mask(triangles_to_remove)
         cropped_mesh.remove_unreferenced_vertices()
 
+        # LOCAL PATCH (2026-08-16), not upstream. Same crash, second way in:
+        # min_num_faces can remove every cluster.
+        if len(cropped_mesh.vertices) == 0:
+            res.success = False
+            res.message = ("Every connected cluster was smaller than "
+                           "min_num_faces=%d, so nothing is left. Lower it or "
+                           "sweep for longer." % (req.min_num_faces,))
+            self.get_logger().error(res.message)
+            return res
 
         o3d.io.write_triangle_mesh(req.mesh_filepath, cropped_mesh, False, True)
         mesh_msg = meshToRos(cropped_mesh)
