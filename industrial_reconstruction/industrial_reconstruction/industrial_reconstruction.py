@@ -15,6 +15,7 @@
 import sys
 import rclpy
 from rclpy.node import Node
+from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy
 from tf2_ros.buffer import Buffer
 from tf2_ros import TransformListener
@@ -49,7 +50,29 @@ class IndustrialReconstruction(Node):
 
         self.bridge = CvBridge()
 
-        self.buffer = Buffer()
+        # LOCAL PATCH (2026-08-16), not upstream.
+        #
+        # cameraCallback keeps a permanent 31-frame backlog: it appends every
+        # synchronised pair to self.sensor_data and only popleft()s once
+        # frame_count > 30, after which it is one append and one popleft per
+        # callback forever. So the pose lookup is always for a frame 31 frames
+        # old. At 30 Hz that is 1 s and tf2's default 10 s cache hides it; at the
+        # 1.3-1.9 Hz a simulated Azure manages it is 16-24 s, every
+        # lookup_transform fails "extrapolation into the past", and NOTHING is
+        # ever integrated -- which surfaces only as "The TSDF is empty" from
+        # stop_reconstruction. Measured against ex-ur10e-1 in sim.
+        #
+        # A parameter rather than a constant because the right value is a
+        # property of the camera: it has to exceed 31/frame_rate.
+        self.declare_parameter("tf_cache_time", 60.0)
+        try:
+            tf_cache_time = float(self.get_parameter('tf_cache_time').value)
+        except Exception:
+            tf_cache_time = 60.0
+        self.get_logger().info("tf_cache_time - %.1f s (needs to exceed "
+                               "31/frame_rate; the pose lookup runs 31 frames "
+                               "behind the camera)" % (tf_cache_time,))
+        self.buffer = Buffer(cache_time=Duration(seconds=tf_cache_time))
         self.tf_listener = TransformListener(buffer=self.buffer, node=self)
 
         self.tsdf_volume = None
