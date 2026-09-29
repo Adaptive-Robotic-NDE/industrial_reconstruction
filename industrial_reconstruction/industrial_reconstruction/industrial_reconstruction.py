@@ -15,6 +15,7 @@
 import sys
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import ExternalShutdownException
 from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy
 from tf2_ros.buffer import Buffer
@@ -50,7 +51,7 @@ class IndustrialReconstruction(Node):
 
         self.bridge = CvBridge()
 
-        # LOCAL PATCH (2026-08-16), not upstream.
+        # LOCAL PATCH, not upstream.
         #
         # cameraCallback keeps a permanent 31-frame backlog: it appends every
         # synchronised pair to self.sensor_data and only popleft()s once
@@ -60,7 +61,7 @@ class IndustrialReconstruction(Node):
         # 1.3-1.9 Hz a simulated Azure manages it is 16-24 s, every
         # lookup_transform fails "extrapolation into the past", and NOTHING is
         # ever integrated -- which surfaces only as "The TSDF is empty" from
-        # stop_reconstruction. Measured against ex-ur10e-1 in sim.
+        # stop_reconstruction.
         #
         # A parameter rather than a constant because the right value is a
         # property of the camera: it has to exceed 31/frame_rate.
@@ -296,7 +297,7 @@ class IndustrialReconstruction(Node):
             dir = np.array([norm_filt.normal_direction.x, norm_filt.normal_direction.y, norm_filt.normal_direction.z]).reshape(3,1)
             cropped_mesh = filterNormals(cropped_mesh, dir, np.radians(norm_filt.angle))
 
-        # LOCAL PATCH (2026-08-16), not upstream. An empty crop is a normal
+        # LOCAL PATCH, not upstream. An empty crop is a normal
         # outcome of a bounding box or a normal filter that did not match, but
         # meshToRos() below does vertices[:, 2].min() and raises "zero-size array
         # to reduction operation minimum" -- unhandled, in a service callback, so
@@ -319,7 +320,7 @@ class IndustrialReconstruction(Node):
         cropped_mesh.remove_triangles_by_mask(triangles_to_remove)
         cropped_mesh.remove_unreferenced_vertices()
 
-        # LOCAL PATCH (2026-08-16), not upstream. Same crash, second way in:
+        # LOCAL PATCH, not upstream. Same crash, second way in:
         # min_num_faces can remove every cluster.
         if len(cropped_mesh.vertices) == 0:
             res.success = False
@@ -420,6 +421,23 @@ class IndustrialReconstruction(Node):
 def main(args=None):
     rclpy.init(args=args)
     industrial_reconstruction = IndustrialReconstruction()
-    rclpy.spin(industrial_reconstruction)
-    industrial_reconstruction.destroy_node()
-    rclpy.shutdown()
+    # LOCAL PATCH, not upstream. An unguarded spin() ends this node on Ctrl-C
+    # with a signal death or a traceback, which reads as a crash in the launch
+    # log even though it is an ordinary shutdown. Under Iron, rclpy's SIGINT
+    # handler makes spin() raise ExternalShutdownException rather than
+    # KeyboardInterrupt, and a second Ctrl-C can land inside the cleanup, so
+    # both are swallowed here.
+    try:
+        rclpy.spin(industrial_reconstruction)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    finally:
+        try:
+            industrial_reconstruction.destroy_node()
+        except BaseException:  # noqa: BLE001
+            pass
+        try:
+            if rclpy.ok():
+                rclpy.shutdown()
+        except BaseException:  # noqa: BLE001
+            pass
